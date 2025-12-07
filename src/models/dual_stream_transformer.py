@@ -1,105 +1,118 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+class ConvBlock(nn.Module):
+    """
+    Basic conv block: Conv -> BN -> ReLU -> Conv -> BN -> ReLU
+    Keeps spatial size (padding=1 for kernel_size=3).
+    """
+
+    def __init__(self, in_ch: int, out_ch: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = F.relu(x, inplace=True)
+
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = F.relu(x, inplace=True)
+
+        return x
 
 
 class DualStreamSarColorizationTransformer(nn.Module):
     """
-    Skeleton structure for the hybrid physics-guided dual-stream transformer.
+    CURRENT VERSION: Simple CNN U-Net–like baseline
+    ------------------------------------------------
+    - Single SAR stream encoder-decoder
+    - Palette / transformer parts are placeholders, not yet used
+    - Outputs:
+        * rgb_out: (B, 3, H, W) in [0,1] via sigmoid
+        * confidence: (B, 1, H, W) in [0,1] via sigmoid
 
-    This class will later contain:
-    - SAR patch embedding + encoder stream
-    - Semantic palette embedding + encoder stream
-    - Cross-attention fusion module
-    - Decoder for RGB image
-    - Confidence map head
+    LATER: We will replace the internals with a real dual-stream
+    transformer while keeping:
+        forward(self, sar_tensor, palette_tokens=None) -> (rgb, conf)
+    so that train/inference code does not need to change.
     """
 
-    def __init__(
-        self,
-        embed_dim: int = 96,
-        num_sar_layers: int = 6,
-        num_palette_layers: int = 4,
-        num_heads: int = 4,
-        patch_size: int = 8,
-        image_size: int = 256,
-    ):
+    def __init__(self, in_channels: int = 1, base_channels: int = 32):
         super().__init__()
 
-        self.embed_dim = embed_dim
-        self.image_size = image_size
-        self.patch_size = patch_size
+        # ---- SAR encoder (downsampling path) ----
+        # 256x256 -> 256x256
+        self.enc1 = ConvBlock(in_channels, base_channels)
 
-        # ------------------------------------------------------------
-        # Placeholder modules (will be replaced with real implementations)
-        # ------------------------------------------------------------
-        self.sar_encoder = nn.Sequential(
-            nn.Conv2d(1, embed_dim, kernel_size=patch_size, stride=patch_size),
-            nn.ReLU(),
+        # 256x256 -> 128x128
+        self.down1 = nn.Conv2d(
+            base_channels, base_channels * 2, kernel_size=3, stride=2, padding=1
         )
+        self.enc2 = ConvBlock(base_channels * 2, base_channels * 2)
 
-        self.palette_encoder = nn.Sequential(
-            nn.Linear(3, embed_dim),  # palette tokens (RGB)
-            nn.ReLU(),
+        # 128x128 -> 64x64
+        self.down2 = nn.Conv2d(
+            base_channels * 2, base_channels * 4, kernel_size=3, stride=2, padding=1
         )
+        self.bottleneck = ConvBlock(base_channels * 4, base_channels * 4)
 
-        # Simple fusion (will become transformer cross-attention later)
-        self.fusion = nn.Linear(embed_dim * 2, embed_dim)
-
-        # Simple decoder (later replaced with transformer/MLP decoder)
-        self.decoder_rgb = nn.Sequential(
-            nn.ConvTranspose2d(embed_dim, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 3, kernel_size=3, padding=1),  # RGB output
-            nn.Tanh(),
+        # ---- Decoder (upsampling path) ----
+        # 64x64 -> 128x128
+        self.up1 = nn.ConvTranspose2d(
+            base_channels * 4, base_channels * 2, kernel_size=2, stride=2
         )
+        self.dec1 = ConvBlock(base_channels * 2 + base_channels * 2, base_channels * 2)
 
-        # Confidence map: 1-channel output
-        self.confidence_head = nn.Conv2d(3, 1, kernel_size=1)
+        # 128x128 -> 256x256
+        self.up2 = nn.ConvTranspose2d(
+            base_channels * 2, base_channels, kernel_size=2, stride=2
+        )
+        self.dec2 = ConvBlock(base_channels + base_channels, base_channels)
+
+        # ---- Output heads ----
+        self.rgb_head = nn.Conv2d(base_channels, 3, kernel_size=1)
+        self.confidence_head = nn.Conv2d(base_channels, 1, kernel_size=1)
+
+        # ---- Placeholders for future transformer / palette stream ----
+        # These keep the interface but do nothing for now.
+        self.palette_encoder = nn.Identity()
+        self.fusion = nn.Identity()
 
     def forward(self, sar_tensor: torch.Tensor, palette_tokens=None):
         """
-        Args:
-            sar_tensor: [B, 1, H, W]
-            palette_tokens: [B, num_palette, 3] (optional for now)
-
-        Returns:
-            rgb_out: [B, 3, H, W]
-            confidence: [B, 1, H, W]
+        sar_tensor: (B, 1, H, W), typically 256x256 after transforms.
+        palette_tokens: reserved for future transformer variant (unused now).
         """
 
-        # ------------------------------------------------------------
-        # SAR stream (placeholder patch encoder)
-        # ------------------------------------------------------------
-        sar_feat = self.sar_encoder(sar_tensor)  # [B, embed_dim, H/P, W/P]
+        # Encoder
+        x1 = self.enc1(sar_tensor)        # (B, C, 256, 256)
+        x2_in = self.down1(x1)            # (B, 2C, 128, 128)
+        x2 = self.enc2(x2_in)             # (B, 2C, 128, 128)
 
-        # ------------------------------------------------------------
-        # Palette stream (placeholder)
-        # ------------------------------------------------------------
-        if palette_tokens is None:
-            # Dummy palette (will be replaced with extracted palette)
-            B = sar_tensor.size(0)
-            palette_tokens = torch.zeros((B, 8, 3), device=sar_tensor.device)
+        x3_in = self.down2(x2)            # (B, 4C, 64, 64)
+        x3 = self.bottleneck(x3_in)       # (B, 4C, 64, 64)
 
-        palette_encoded = self.palette_encoder(palette_tokens)  # [B, num_p, embed_dim]
+        # Decoder with skip connections (U-Net style)
+        u1 = self.up1(x3)                 # (B, 2C, 128, 128)
+        # concatenate encoder features from same scale
+        u1 = torch.cat([u1, x2], dim=1)   # (B, 4C, 128, 128)
+        u1 = self.dec1(u1)                # (B, 2C, 128, 128)
 
-        # Simple fusion (later = cross-attention)
-        # Expand SAR features to match vector form
-        sar_vector = sar_feat.mean(dim=[2, 3])  # [B, embed_dim]
-        palette_vector = palette_encoded.mean(dim=1)  # [B, embed_dim]
+        u2 = self.up2(u1)                 # (B, C, 256, 256)
+        u2 = torch.cat([u2, x1], dim=1)   # (B, 2C, 256, 256)
+        u2 = self.dec2(u2)                # (B, C, 256, 256)
 
-        fused = torch.cat([sar_vector, palette_vector], dim=-1)
-        fused = self.fusion(fused)  # [B, embed_dim]
+        # RGB in [0,1]
+        rgb_out = torch.sigmoid(self.rgb_head(u2))       # (B, 3, 256, 256)
 
-        # Expand fused vector back to spatial map
-        B, C, Hs, Ws = sar_feat.shape
-        fused_map = fused.unsqueeze(-1).unsqueeze(-1).expand(B, C, Hs, Ws)
-
-        # Decode to RGB
-        rgb_out = self.decoder_rgb(fused_map)  # [B, 3, H, W]
-
-        # Confidence map
-        confidence = self.confidence_head(rgb_out)  # [B, 1, H, W]
+        # Confidence in [0,1]
+        confidence = torch.sigmoid(self.confidence_head(u2))  # (B, 1, 256, 256)
 
         return rgb_out, confidence
