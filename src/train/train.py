@@ -25,7 +25,7 @@ class Config:
     batch_size = 1
     num_workers = 0
     lr = 2e-4
-    num_epochs = 5
+    num_epochs = 50
     checkpoint_dir = "checkpoints"
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
