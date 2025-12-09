@@ -25,7 +25,7 @@ class Config:
     batch_size = 1
     num_workers = 0
     lr = 2e-4
-    num_epochs = 50
+    num_epochs = 9
     checkpoint_dir = "checkpoints"
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -158,8 +158,8 @@ def train():
             optimizer.zero_grad()
 
             # Forward pass
-            # Currently we only pass SAR; later you may also pass palette tokens
-            pred_rgb, pred_conf = model(sar)
+            # Pass SAR + optical (ground-truth RGB) so the palette stream can learn
+            pred_rgb, pred_conf = model(sar, optical)
 
             # Compute total loss (multi-term)
             total_loss, loss_dict = compute_total_loss(
